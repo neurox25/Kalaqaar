@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+
+# Flutter / Dart
+.build/
+.dart_tool/
+.flutter-plugins
+.packages
+pubspec.lock
+build/
+
+# Android
+**/android/*.iml
+**/android/local.properties
+
+# Android Studio / VSCode
+.idea/
+.vscode/
+
+# Node / admin-panel / website build outputs
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Firebase emulators / exports / credentials
+.emulator-data/
+.firebase/
+.env
+.env.*.local
+
+# Misc
+*.iml
+*.log
