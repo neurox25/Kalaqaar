@@ -1,0 +1,79 @@
+{
+  "name": "kalaqaar-monorepo",
+  "version": "1.0.0",
+  "description": "KalaQaar - Book Artists & Technicians instantly",
+  "private": true,
+  "scripts": {
+    "dev": "npm run dev --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "clean": "npm run clean --workspaces --if-present",
+    "install:all": "npm install && cd apps/mobile && fvm flutter pub get && cd ../../services/functions && npm install && cd ../../apps/admin && npm install && cd ../../apps/web && npm install",
+    "install:mobile": "cd apps/mobile && fvm flutter pub get",
+    "install:functions": "npm run --prefix services/functions install",
+    "install:admin": "npm run --prefix apps/admin install",
+    "install:web": "npm run --prefix apps/web install",
+    "install:api": "pip install -r services/api/requirements.txt",
+    "test:all": "npm-run-all test:mobile test:functions test:admin test:web test:e2e",
+    "test:mobile": "npm run --prefix apps/mobile test",
+    "test:admin": "npm run --prefix apps/admin test",
+    "test:web": "npm run --prefix apps/web test",
+    "lint:all": "npm-run-all lint:mobile lint:functions lint:admin lint:web",
+    "lint:mobile": "npm run --prefix apps/mobile lint",
+    "lint:admin": "npm run --prefix apps/admin lint",
+    "lint:web": "npm run --prefix apps/web lint",
+    "format:all": "npm-run-all format:mobile format:functions format:admin format:web",
+    "format:mobile": "npm run --prefix apps/mobile format",
+    "format:admin": "npm run --prefix apps/admin format",
+    "format:web": "npm run --prefix apps/web format",
+    "build:all": "npm-run-all build:mobile build:admin build:web",
+    "build:mobile": "cd apps/mobile && fvm flutter pub get && fvm flutter build appbundle --release",
+    "build:admin": "npm run --prefix apps/admin build",
+    "build:web": "npm run --prefix apps/web build:export",
+    "deploy:all": "npm run build:all && firebase deploy",
+    "deploy:website": "npm run --prefix apps/web build:export && firebase deploy --only hosting:kalaqaar",
+    "test:functions": "npm run --prefix services/functions test",
+    "lint:functions": "npm run --prefix services/functions lint",
+    "test:e2e": "npx playwright test",
+    "test:emulators:start": "firebase emulators:start --only functions,firestore,auth",
+    "clean:all": "cd apps/mobile && fvm flutter clean && rm -rf ../../apps/admin/.next ../../apps/web/.next ../../services/functions/node_modules ../../node_modules",
+    "brand:sync": "node tools/sync_brand_assets.js",
+    "prepare": "husky",
+    "config:load": "node config/config.js load",
+    "config:validate": "node config/config.js validate FIREBASE_PROJECT_ID FIREBASE_WEB_API_KEY",
+    "config:show": "node config/config.js show",
+    "config:setup": "cp config/.env.template config/.env && echo '✅ Configuration template copied to config/.env. Please edit with your actual values.'"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@testing-library/dom": "^10.4.1",
+    "@types/node": "^24.9.1",
+    "@typescript-eslint/eslint-plugin": "^8.46.2",
+    "@typescript-eslint/parser": "^8.46.2",
+    "firebase-tools": "^14.22.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.2.6",
+    "npm-run-all": "^4.1.5",
+    "tldts": "^7.0.17"
+  },
+  "lint-staged": {
+    "apps/mobile/lib/**/*.dart": [
+      "fvm flutter format --set-exit-if-changed",
+      "fvm flutter analyze"
+    ],
+    "services/functions/**/*.js": [
+      "npx eslint --fix --cache"
+    ],
+    "*.md": [
+      "npx prettier --write"
+    ]
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
+}

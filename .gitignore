@@ -1,3 +1,5 @@
+# .gitignore
+
 # macOS
 .DS_Store
 
@@ -15,7 +17,6 @@ build/
 
 # Android Studio / VSCode
 .idea/
-.vscode/
 
 # Node / admin-panel / website build outputs
 node_modules/
@@ -28,6 +29,23 @@ yarn-error.log
 .env
 .env.*.local
 
+# Google API discovery documents (often cached by client libraries)
+*/**/discovery_cache/documents/*.json
+
 # Misc
 *.iml
 *.log
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/
+
+# Prevent committing service account JSONs and other private keys
+kalaqaar-service-account.json
+services/functions/test/*.json
+
+# FVM
+.fvm/flutter_sdk

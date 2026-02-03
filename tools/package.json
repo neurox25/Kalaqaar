@@ -1,0 +1,15 @@
+{
+    "name": "kalaqaar-test-tools",
+    "version": "1.0.0",
+    "description": "Test scripts for Kalaqaar E2E testing",
+    "scripts": {
+        "create-booking": "node create_test_booking.js",
+        "send-webhook": "node send_test_webhook.js",
+        "get-token": "node get_id_token_for_email.js"
+    },
+    "dependencies": {
+        "firebase-admin": "^13.5.0",
+        "axios": "^1.12.2",
+        "uuid": "^13.0.0"
+    }
+}
