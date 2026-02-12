@@ -173,13 +173,12 @@ jobs:
 
       - name: Build Website
         if: contains(inputs.target, 'hosting:website')
-        working-directory: apps/web
         run: |
           set -euo pipefail
-          npm ci || npm install
-          npm run build
-          if [[ -f package.json ]] && jq -e '.scripts["build:export"]' package.json >/dev/null; then
-            npm run build:export
+          npm --prefix apps/web ci || npm --prefix apps/web install --no-workspaces
+          npm --prefix apps/web run build
+          if [[ -f apps/web/package.json ]] && jq -e '.scripts["build:export"]' apps/web/package.json >/dev/null; then
+            npm --prefix apps/web run build:export
           fi
 
       - name: Deploy Website Hosting
