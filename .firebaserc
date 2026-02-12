@@ -1,0 +1,30 @@
+{
+  "projects": {
+    "default": "kalaqaar-1cd70",
+    "prod": "kalaqaar-1cd70",
+    "staging": "kalaqaar-staging"
+  },
+  "targets": {
+    "kalaqaar-staging": {
+      "hosting": {
+        "admin-panel": [
+          "kalaqaar-admin-staging"
+        ],
+        "web": [
+          "kalaqaar-web-staging"
+        ]
+      }
+    },
+    "kalaqaar-1cd70": {
+      "hosting": {
+        "admin-panel": [
+          "kalaqaar-1cd70"
+        ],
+        "web": [
+          "kalaqaar"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}

@@ -1,0 +1,194 @@
+name: Deploy Functions (OIDC)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - prod
+      functions:
+        description: "Comma-separated list of functions to deploy (e.g. createOrder,health)"
+        required: true
+        default: ""
+      push_secrets:
+        description: "Set to true to run optional secrets push step"
+        required: false
+        default: "false"
+      confirm_production:
+        description: "Required for prod deploys: type DEPLOY_PROD"
+        required: false
+        default: ""
+  push:
+    branches: [main, staging]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && (inputs.environment == 'prod' && 'production' || 'staging') || (github.ref_name == 'main' && 'production' || 'staging') }}
+    concurrency:
+      group: functions-deploy-${{ github.event_name == 'workflow_dispatch' && (inputs.environment == 'prod' && 'production' || 'staging') || (github.ref_name == 'main' && 'production' || 'staging') }}
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      GCP_PROJECT_STAGING: ${{ vars.GCP_PROJECT_STAGING }}
+      GCP_PROJECT_PROD: ${{ vars.GCP_PROJECT_PROD }}
+      API_BASE_URL_STAGING: ${{ vars.API_BASE_URL_STAGING }}
+      API_BASE_URL_PROD: ${{ vars.API_BASE_URL_PROD }}
+      GCP_WORKLOAD_ID_PROVIDER: ${{ secrets.GCP_WORKLOAD_ID_PROVIDER }}
+      GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
+      LEGACY_PROJECT_FALLBACK: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve environment and project
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GCP_PROJECT_STAGING:-}" || -z "${GCP_PROJECT_PROD:-}" ]]; then
+            echo "Missing GCP_PROJECT_STAGING/GCP_PROJECT_PROD variables." >&2
+            exit 1
+          fi
+          if [[ "$GCP_PROJECT_STAGING" == "$GCP_PROJECT_PROD" ]]; then
+            echo "Staging and production GCP projects must be different." >&2
+            exit 1
+          fi
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            TARGET_ENV="${{ inputs.environment }}"
+          elif [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            TARGET_ENV="prod"
+          else
+            TARGET_ENV="staging"
+          fi
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "$TARGET_ENV" == "prod" && "${{ inputs.confirm_production }}" != "DEPLOY_PROD" ]]; then
+            echo "Prod deploy requires confirm_production=DEPLOY_PROD." >&2
+            exit 1
+          fi
+
+          if [[ "$TARGET_ENV" == "prod" ]]; then
+            PROJECT_ID="${GCP_PROJECT_PROD:-$LEGACY_PROJECT_FALLBACK}"
+            API_BASE_URL="${API_BASE_URL_PROD:-https://api.kalaqaar.com}"
+          else
+            PROJECT_ID="${GCP_PROJECT_STAGING:-$LEGACY_PROJECT_FALLBACK}"
+            API_BASE_URL="${API_BASE_URL_STAGING:-https://api.kalaqaar.com}"
+          fi
+
+          if [[ -z "$PROJECT_ID" ]]; then
+            echo "Missing GCP project variable for TARGET_ENV=$TARGET_ENV" >&2
+            echo "Set GCP_PROJECT_STAGING/GCP_PROJECT_PROD in repo variables." >&2
+            exit 1
+          fi
+
+          # Safety: never auto-promote to prod from non-main pushes.
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "$TARGET_ENV" == "prod" && "${GITHUB_REF_NAME}" != "main" ]]; then
+            echo "Refusing prod deploy from non-main push." >&2
+            exit 1
+          fi
+
+          echo "TARGET_ENV=$TARGET_ENV" >> "$GITHUB_ENV"
+          echo "GCP_PROJECT=$PROJECT_ID" >> "$GITHUB_ENV"
+          echo "API_BASE_URL=$API_BASE_URL" >> "$GITHUB_ENV"
+          echo "Resolved target: env=$TARGET_ENV project=$PROJECT_ID api=$API_BASE_URL"
+
+      - name: Validate OIDC configuration
+        run: |
+          set -euo pipefail
+          if [[ -z "${GCP_WORKLOAD_ID_PROVIDER:-}" || -z "${GCP_SA_EMAIL:-}" ]]; then
+            echo "Missing OIDC secrets. Set GCP_WORKLOAD_ID_PROVIDER and GCP_SA_EMAIL." >&2
+            exit 1
+          fi
+
+      - name: Authenticate to GCP using OIDC
+        uses: google-github-actions/auth@v1
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_ID_PROVIDER }}
+          service_account: ${{ env.GCP_SA_EMAIL }}
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: ${{ env.GCP_PROJECT }}
+
+      - name: (Optional) Push secrets from encrypted archive
+        if: ${{ github.event.inputs.push_secrets == 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/kalaqaar-secrets
+          echo "${{ secrets.FUNCTIONS_SECRETS_FILE }}" > /tmp/kalaqaar-secrets/secrets.b64
+          base64 --decode /tmp/kalaqaar-secrets/secrets.b64 > /tmp/kalaqaar-secrets/secrets.tar.gz
+          tar -xzf /tmp/kalaqaar-secrets/secrets.tar.gz -C /tmp/kalaqaar-secrets
+          for f in /tmp/kalaqaar-secrets/*; do
+            name=$(basename "$f")
+            gcloud secrets create "$name" --data-file="$f" --project="$GCP_PROJECT" --replication-policy="automatic" || \
+              gcloud secrets versions add "$name" --data-file="$f" --project="$GCP_PROJECT"
+          done
+
+      - name: Install firebase-tools
+        run: npm install -g firebase-tools@latest
+
+      - name: Resolve function list
+        run: |
+          set -euo pipefail
+          FUNCTIONS_INPUT='${{ github.event.inputs.functions }}'
+          if [[ -z "$FUNCTIONS_INPUT" ]]; then
+            if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+              echo "No function list provided on push; skipping deploy."
+              echo "SKIP_DEPLOY=true" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "No functions specified. Set workflow input 'functions'." >&2
+            exit 1
+          fi
+          IFS=',' read -r -a arr <<< "$FUNCTIONS_INPUT"
+          deploy_arg=""
+          for fn in "${arr[@]}"; do
+            fn_trimmed=$(echo "$fn" | xargs)
+            if [[ -n "$fn_trimmed" ]]; then
+              if [[ -n "$deploy_arg" ]]; then
+                deploy_arg="$deploy_arg,functions:$fn_trimmed"
+              else
+                deploy_arg="functions:$fn_trimmed"
+              fi
+            fi
+          done
+          if [[ -z "$deploy_arg" ]]; then
+            echo "No valid functions parsed from input: $FUNCTIONS_INPUT" >&2
+            exit 1
+          fi
+          echo "DEPLOY_ARG=$deploy_arg" >> "$GITHUB_ENV"
+
+      - name: Deploy Cloud Functions
+        if: env.SKIP_DEPLOY != 'true'
+        env:
+          ADMIN_OWNER_UIDS: ${{ secrets.ADMIN_OWNER_UIDS }}
+        run: |
+          set -euo pipefail
+          cd services/functions
+          npm ci
+          if [[ -n "${ADMIN_OWNER_UIDS:-}" ]]; then
+            touch .env
+            if grep -q '^ADMIN_OWNER_UIDS=' .env; then
+              sed -i.bak "s|^ADMIN_OWNER_UIDS=.*|ADMIN_OWNER_UIDS=$ADMIN_OWNER_UIDS|" .env && rm -f .env.bak
+            else
+              printf '\nADMIN_OWNER_UIDS=%s\n' "$ADMIN_OWNER_UIDS" >> .env
+            fi
+          fi
+          firebase deploy --only "$DEPLOY_ARG" --project "$GCP_PROJECT"
+
+      - name: Run smoke checks
+        if: env.SKIP_DEPLOY != 'true'
+        run: |
+          set -euo pipefail
+          if [[ -n "${API_BASE_URL:-}" ]]; then
+            curl -fS "${API_BASE_URL}/api/health" >/dev/null
+          fi
+          curl -fS "https://asia-south1-${GCP_PROJECT}.cloudfunctions.net/testSecretAccess" >/dev/null || true

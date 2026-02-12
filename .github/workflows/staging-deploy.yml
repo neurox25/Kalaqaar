@@ -1,0 +1,202 @@
+name: Environment Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - prod
+      target:
+        description: "What to deploy"
+        required: true
+        default: "functions,hosting"
+        type: choice
+        options:
+          - functions
+          - hosting:admin
+          - hosting:website
+          - functions,hosting
+      confirm_production:
+        description: "Required for prod deploys: type DEPLOY_PROD"
+        required: false
+        default: ""
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment == 'prod' && 'production' || 'staging' }}
+    concurrency:
+      group: env-deploy-${{ inputs.environment }}-${{ inputs.target }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      FIREBASE_PROJECT_STAGING: ${{ vars.FIREBASE_PROJECT_STAGING }}
+      FIREBASE_PROJECT_PROD: ${{ vars.FIREBASE_PROJECT_PROD }}
+      FIREBASE_HOSTING_SITE_ADMIN_STAGING: ${{ vars.FIREBASE_HOSTING_SITE_ADMIN_STAGING }}
+      FIREBASE_HOSTING_SITE_ADMIN_PROD: ${{ vars.FIREBASE_HOSTING_SITE_ADMIN_PROD }}
+      FIREBASE_HOSTING_SITE_WEB_STAGING: ${{ vars.FIREBASE_HOSTING_SITE_WEB_STAGING }}
+      FIREBASE_HOSTING_SITE_WEB_PROD: ${{ vars.FIREBASE_HOSTING_SITE_WEB_PROD }}
+      GCP_PROJECT_STAGING: ${{ vars.GCP_PROJECT_STAGING }}
+      GCP_PROJECT_PROD: ${{ vars.GCP_PROJECT_PROD }}
+      GCP_WORKLOAD_ID_PROVIDER: ${{ secrets.GCP_WORKLOAD_ID_PROVIDER }}
+      GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Resolve environment configuration
+        run: |
+          set -euo pipefail
+          TARGET_ENV="${{ inputs.environment }}"
+
+          # Hard guard: staging and prod must not share project IDs.
+          if [[ -z "${FIREBASE_PROJECT_STAGING:-}" || -z "${FIREBASE_PROJECT_PROD:-}" ]]; then
+            echo "Missing FIREBASE_PROJECT_STAGING/FIREBASE_PROJECT_PROD variables." >&2
+            exit 1
+          fi
+          if [[ "$FIREBASE_PROJECT_STAGING" == "$FIREBASE_PROJECT_PROD" ]]; then
+            echo "Staging and production Firebase projects must be different." >&2
+            exit 1
+          fi
+
+          if [[ -z "${GCP_PROJECT_STAGING:-}" || -z "${GCP_PROJECT_PROD:-}" ]]; then
+            echo "Missing GCP_PROJECT_STAGING/GCP_PROJECT_PROD variables." >&2
+            exit 1
+          fi
+          if [[ "$GCP_PROJECT_STAGING" == "$GCP_PROJECT_PROD" ]]; then
+            echo "Staging and production GCP projects must be different." >&2
+            exit 1
+          fi
+
+          # Production deploys are only allowed when manually triggered from main.
+          if [[ "$TARGET_ENV" == "prod" && "${GITHUB_REF_NAME}" != "main" ]]; then
+            echo "Prod deploy is allowed only from the main branch." >&2
+            exit 1
+          fi
+          if [[ "$TARGET_ENV" == "prod" && "${{ inputs.confirm_production }}" != "DEPLOY_PROD" ]]; then
+            echo "Prod deploy requires confirm_production=DEPLOY_PROD." >&2
+            exit 1
+          fi
+
+          if [[ "$TARGET_ENV" == "prod" ]]; then
+            PROJECT_ID="${FIREBASE_PROJECT_PROD:-}"
+            ADMIN_SITE="${FIREBASE_HOSTING_SITE_ADMIN_PROD:-}"
+            WEB_SITE="${FIREBASE_HOSTING_SITE_WEB_PROD:-}"
+            GCP_PROJECT="${GCP_PROJECT_PROD:-$PROJECT_ID}"
+          else
+            PROJECT_ID="${FIREBASE_PROJECT_STAGING:-}"
+            ADMIN_SITE="${FIREBASE_HOSTING_SITE_ADMIN_STAGING:-}"
+            WEB_SITE="${FIREBASE_HOSTING_SITE_WEB_STAGING:-}"
+            GCP_PROJECT="${GCP_PROJECT_STAGING:-$PROJECT_ID}"
+          fi
+
+          if [[ -z "$PROJECT_ID" || -z "$ADMIN_SITE" || -z "$WEB_SITE" || -z "$GCP_PROJECT" ]]; then
+            echo "Missing required project/site variables for TARGET_ENV=$TARGET_ENV" >&2
+            echo "Set FIREBASE/GCP vars in repo variables before deploy." >&2
+            exit 1
+          fi
+
+          echo "TARGET_ENV=$TARGET_ENV" >> "$GITHUB_ENV"
+          echo "FIREBASE_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
+          echo "FIREBASE_HOSTING_SITE_ADMIN=$ADMIN_SITE" >> "$GITHUB_ENV"
+          echo "FIREBASE_HOSTING_SITE_WEB=$WEB_SITE" >> "$GITHUB_ENV"
+          echo "GCP_PROJECT_ID=$GCP_PROJECT" >> "$GITHUB_ENV"
+
+          echo "Resolved deploy target:"
+          echo "  environment=$TARGET_ENV"
+          echo "  project=$PROJECT_ID"
+          echo "  admin_site=$ADMIN_SITE"
+          echo "  web_site=$WEB_SITE"
+          echo "  gcp_project=$GCP_PROJECT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Firebase Tools
+        run: npm i -g firebase-tools
+
+      - name: Validate Firebase auth token
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: |
+          if [[ -z "${FIREBASE_TOKEN:-}" ]]; then
+            echo "Missing FIREBASE_TOKEN secret" >&2
+            exit 1
+          fi
+          firebase --version
+
+      - name: Authenticate to GCP via Workload Identity (optional)
+        if: ${{ env.GCP_WORKLOAD_ID_PROVIDER != '' && env.GCP_SA_EMAIL != '' }}
+        uses: google-github-actions/auth@v1
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_ID_PROVIDER }}
+          service_account: ${{ env.GCP_SA_EMAIL }}
+
+      - name: Setup gcloud CLI (optional)
+        if: ${{ env.GCP_WORKLOAD_ID_PROVIDER != '' && env.GCP_SA_EMAIL != '' }}
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          export_default_credentials: true
+
+      - name: Deploy Functions
+        if: contains(inputs.target, 'functions')
+        working-directory: services/functions
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+          ADMIN_OWNER_UIDS: ${{ secrets.ADMIN_OWNER_UIDS }}
+        run: |
+          set -euo pipefail
+          npm ci
+          if [[ -n "${ADMIN_OWNER_UIDS:-}" ]]; then
+            touch .env
+            if grep -q '^ADMIN_OWNER_UIDS=' .env; then
+              sed -i.bak "s|^ADMIN_OWNER_UIDS=.*|ADMIN_OWNER_UIDS=$ADMIN_OWNER_UIDS|" .env && rm -f .env.bak
+            else
+              printf '\nADMIN_OWNER_UIDS=%s\n' "$ADMIN_OWNER_UIDS" >> .env
+            fi
+          fi
+          firebase deploy --only functions --project "$FIREBASE_PROJECT_ID" --token "$FIREBASE_TOKEN"
+
+      - name: Deploy Admin Hosting
+        if: contains(inputs.target, 'hosting:admin')
+        working-directory: apps/admin
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          cd ../..
+          firebase deploy --only "hosting:${FIREBASE_HOSTING_SITE_ADMIN}" --project "$FIREBASE_PROJECT_ID" --token "$FIREBASE_TOKEN"
+
+      - name: Build Website
+        if: contains(inputs.target, 'hosting:website')
+        working-directory: apps/web
+        run: |
+          set -euo pipefail
+          npm ci || npm install
+          npm run build
+          if [[ -f package.json ]] && jq -e '.scripts["build:export"]' package.json >/dev/null; then
+            npm run build:export
+          fi
+
+      - name: Deploy Website Hosting
+        if: contains(inputs.target, 'hosting:website')
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          firebase deploy --only "hosting:${FIREBASE_HOSTING_SITE_WEB}" --project "$FIREBASE_PROJECT_ID" --token "$FIREBASE_TOKEN"
