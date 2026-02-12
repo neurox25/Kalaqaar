@@ -137,18 +137,8 @@ jobs:
           fi
           firebase --version
 
-      - name: Authenticate to GCP via Workload Identity (optional)
-        if: ${{ env.GCP_WORKLOAD_ID_PROVIDER != '' && env.GCP_SA_EMAIL != '' }}
-        uses: google-github-actions/auth@v1
-        with:
-          workload_identity_provider: ${{ env.GCP_WORKLOAD_ID_PROVIDER }}
-          service_account: ${{ env.GCP_SA_EMAIL }}
-
-      - name: Setup gcloud CLI (optional)
-        if: ${{ env.GCP_WORKLOAD_ID_PROVIDER != '' && env.GCP_SA_EMAIL != '' }}
-        uses: google-github-actions/setup-gcloud@v1
-        with:
-          project_id: ${{ env.GCP_PROJECT_ID }}
+      # NOTE: This workflow uses FIREBASE_TOKEN-based deploys and does not
+      # require gcloud/OIDC auth to proceed.
 
       - name: Deploy Functions
         if: contains(inputs.target, 'functions')
