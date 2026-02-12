@@ -137,19 +137,8 @@ jobs:
           fi
           firebase --version
 
-      - name: Authenticate to GCP via Workload Identity (optional)
-        if: ${{ env.GCP_WORKLOAD_ID_PROVIDER != '' && env.GCP_SA_EMAIL != '' }}
-        uses: google-github-actions/auth@v1
-        with:
-          workload_identity_provider: ${{ env.GCP_WORKLOAD_ID_PROVIDER }}
-          service_account: ${{ env.GCP_SA_EMAIL }}
-
-      - name: Setup gcloud CLI (optional)
-        if: ${{ env.GCP_WORKLOAD_ID_PROVIDER != '' && env.GCP_SA_EMAIL != '' }}
-        uses: google-github-actions/setup-gcloud@v1
-        with:
-          project_id: ${{ env.GCP_PROJECT_ID }}
-          export_default_credentials: true
+      # NOTE: This workflow uses FIREBASE_TOKEN-based deploys and does not
+      # require gcloud/OIDC auth to proceed.
 
       - name: Deploy Functions
         if: contains(inputs.target, 'functions')
@@ -184,13 +173,12 @@ jobs:
 
       - name: Build Website
         if: contains(inputs.target, 'hosting:website')
-        working-directory: apps/web
         run: |
           set -euo pipefail
-          npm ci || npm install
-          npm run build
-          if [[ -f package.json ]] && jq -e '.scripts["build:export"]' package.json >/dev/null; then
-            npm run build:export
+          npm --prefix apps/web ci || npm --prefix apps/web install --no-workspaces
+          npm --prefix apps/web run build
+          if [[ -f apps/web/package.json ]] && jq -e '.scripts["build:export"]' apps/web/package.json >/dev/null; then
+            npm --prefix apps/web run build:export
           fi
 
       - name: Deploy Website Hosting
