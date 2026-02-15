@@ -29,7 +29,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'workflow_dispatch' && (inputs.environment == 'prod' && 'production' || 'staging') || (github.ref_name == 'main' && 'production' || 'staging') }}
+    environment: ${{ inputs.environment == 'prod' && 'production' || 'staging' }}
     concurrency:
       group: functions-deploy-${{ github.event_name == 'workflow_dispatch' && (inputs.environment == 'prod' && 'production' || 'staging') || (github.ref_name == 'main' && 'production' || 'staging') }}
       cancel-in-progress: false
