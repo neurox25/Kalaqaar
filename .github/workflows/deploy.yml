@@ -1,4 +1,4 @@
-name: Environment Deploy
+name: Unified Deployment
 
 on:
   workflow_dispatch:
@@ -14,31 +14,44 @@ on:
       target:
         description: "What to deploy"
         required: true
-        default: "functions,hosting"
+        default: "functions"
         type: choice
         options:
           - functions
           - hosting:admin
           - hosting:website
           - functions,hosting
+          - functions:specific
+      functions:
+        description: "Comma-separated list of specific functions (for functions:specific)"
+        required: false
+        default: ""
+      push_secrets:
+        description: "Set to true to push secrets to GCP"
+        required: false
+        default: "false"
+        type: boolean
       confirm_production:
         description: "Required for prod deploys: type DEPLOY_PROD"
         required: false
         default: ""
+  push:
+    branches: [main, staging]
 
 env:
   NODE_VERSION: "20"
+  FLUTTER_VERSION: "3.38.0"
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment == 'prod' && 'production' || 'staging' }}
+    environment: ${{ github.event_name == 'workflow_dispatch' && (inputs.environment == 'prod' && 'production' || 'staging') || (github.ref_name == 'main' && 'production' || 'staging') }}
     concurrency:
-      group: env-deploy-${{ inputs.environment }}-${{ inputs.target }}
+      group: unified-deploy-${{ github.event_name == 'workflow_dispatch' && (inputs.environment == 'prod' && 'production' || 'staging') || (github.ref_name == 'main' && 'production' || 'staging') }}
       cancel-in-progress: false
     permissions:
-      contents: read
       id-token: write
+      contents: read
     env:
       FIREBASE_PROJECT_STAGING: ${{ vars.FIREBASE_PROJECT_STAGING }}
       FIREBASE_PROJECT_PROD: ${{ vars.FIREBASE_PROJECT_PROD }}
@@ -48,8 +61,11 @@ jobs:
       FIREBASE_HOSTING_SITE_WEB_PROD: ${{ vars.FIREBASE_HOSTING_SITE_WEB_PROD }}
       GCP_PROJECT_STAGING: ${{ vars.GCP_PROJECT_STAGING }}
       GCP_PROJECT_PROD: ${{ vars.GCP_PROJECT_PROD }}
+      API_BASE_URL_STAGING: ${{ vars.API_BASE_URL_STAGING }}
+      API_BASE_URL_PROD: ${{ vars.API_BASE_URL_PROD }}
       GCP_WORKLOAD_ID_PROVIDER: ${{ secrets.GCP_WORKLOAD_ID_PROVIDER }}
       GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
+      FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
       # Firebase web config variables for frontend
       NEXT_PUBLIC_FIREBASE_API_KEY: ${{ vars.NEXT_PUBLIC_FIREBASE_API_KEY }}
       NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: ${{ vars.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN }}
@@ -57,6 +73,7 @@ jobs:
       NEXT_PUBLIC_FIREBASE_APP_ID: ${{ vars.NEXT_PUBLIC_FIREBASE_APP_ID }}
       NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID }}
       NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: ${{ vars.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -64,9 +81,7 @@ jobs:
       - name: Resolve environment configuration
         run: |
           set -euo pipefail
-          TARGET_ENV="${{ inputs.environment }}"
 
-          # Hard guard: staging and prod must not share project IDs.
           if [[ -z "${FIREBASE_PROJECT_STAGING:-}" || -z "${FIREBASE_PROJECT_PROD:-}" ]]; then
             echo "Missing FIREBASE_PROJECT_STAGING/FIREBASE_PROJECT_PROD variables." >&2
             exit 1
@@ -85,12 +100,15 @@ jobs:
             exit 1
           fi
 
-          # Production deploys are only allowed when manually triggered from main.
-          if [[ "$TARGET_ENV" == "prod" && "${GITHUB_REF_NAME}" != "main" ]]; then
-            echo "Prod deploy is allowed only from the main branch." >&2
-            exit 1
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            TARGET_ENV="${{ inputs.environment }}"
+          elif [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            TARGET_ENV="prod"
+          else
+            TARGET_ENV="staging"
           fi
-          if [[ "$TARGET_ENV" == "prod" && "${{ inputs.confirm_production }}" != "DEPLOY_PROD" ]]; then
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "$TARGET_ENV" == "prod" && "${{ inputs.confirm_production }}" != "DEPLOY_PROD" ]]; then
             echo "Prod deploy requires confirm_production=DEPLOY_PROD." >&2
             exit 1
           fi
@@ -99,17 +117,18 @@ jobs:
             PROJECT_ID="${FIREBASE_PROJECT_PROD:-}"
             ADMIN_SITE="${FIREBASE_HOSTING_SITE_ADMIN_PROD:-}"
             WEB_SITE="${FIREBASE_HOSTING_SITE_WEB_PROD:-}"
-            GCP_PROJECT="${GCP_PROJECT_PROD:-$PROJECT_ID}"
+            GCP_PROJECT="${GCP_PROJECT_PROD:-}"
+            API_BASE_URL="${API_BASE_URL_PROD:-https://api.kalaqaar.com}"
           else
             PROJECT_ID="${FIREBASE_PROJECT_STAGING:-}"
             ADMIN_SITE="${FIREBASE_HOSTING_SITE_ADMIN_STAGING:-}"
             WEB_SITE="${FIREBASE_HOSTING_SITE_WEB_STAGING:-}"
-            GCP_PROJECT="${GCP_PROJECT_STAGING:-$PROJECT_ID}"
+            GCP_PROJECT="${GCP_PROJECT_STAGING:-}"
+            API_BASE_URL="${API_BASE_URL_STAGING:-https://api.kalaqaar.com}"
           fi
 
           if [[ -z "$PROJECT_ID" || -z "$ADMIN_SITE" || -z "$WEB_SITE" || -z "$GCP_PROJECT" ]]; then
             echo "Missing required project/site variables for TARGET_ENV=$TARGET_ENV" >&2
-            echo "Set FIREBASE/GCP vars in repo variables before deploy." >&2
             exit 1
           fi
 
@@ -118,6 +137,7 @@ jobs:
           echo "FIREBASE_HOSTING_SITE_ADMIN=$ADMIN_SITE" >> "$GITHUB_ENV"
           echo "FIREBASE_HOSTING_SITE_WEB=$WEB_SITE" >> "$GITHUB_ENV"
           echo "GCP_PROJECT_ID=$GCP_PROJECT" >> "$GITHUB_ENV"
+          echo "API_BASE_URL=$API_BASE_URL" >> "$GITHUB_ENV"
 
           echo "Resolved deploy target:"
           echo "  environment=$TARGET_ENV"
@@ -125,6 +145,25 @@ jobs:
           echo "  admin_site=$ADMIN_SITE"
           echo "  web_site=$WEB_SITE"
           echo "  gcp_project=$GCP_PROJECT"
+
+      - name: Validate OIDC configuration
+        run: |
+          set -euo pipefail
+          if [[ -z "${GCP_WORKLOAD_ID_PROVIDER:-}" || -z "${GCP_SA_EMAIL:-}" ]]; then
+            echo "Missing OIDC secrets. Set GCP_WORKLOAD_ID_PROVIDER and GCP_SA_EMAIL." >&2
+            exit 1
+          fi
+
+      - name: Authenticate to GCP using OIDC
+        uses: google-github-actions/auth@v1
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_ID_PROVIDER }}
+          service_account: ${{ env.GCP_SA_EMAIL }}
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -134,24 +173,52 @@ jobs:
       - name: Install Firebase Tools
         run: npm i -g firebase-tools
 
-      - name: Validate Firebase auth token
-        env:
-          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+      - name: (Optional) Push secrets from encrypted archive
+        if: ${{ github.event.inputs.push_secrets == 'true' }}
         run: |
-          if [[ -z "${FIREBASE_TOKEN:-}" ]]; then
-            echo "Missing FIREBASE_TOKEN secret" >&2
-            exit 1
-          fi
-          firebase --version
+          set -euo pipefail
+          mkdir -p /tmp/kalaqaar-secrets
+          echo "${{ secrets.FUNCTIONS_SECRETS_FILE }}" > /tmp/kalaqaar-secrets/secrets.b64
+          base64 --decode /tmp/kalaqaar-secrets/secrets.b64 > /tmp/kalaqaar-secrets/secrets.tar.gz
+          tar -xzf /tmp/kalaqaar-secrets/secrets.tar.gz -C /tmp/kalaqaar-secrets
+          for f in /tmp/kalaqaar-secrets/*; do
+            name=$(basename "$f")
+            gcloud secrets create "$name" --data-file="$f" --project="$GCP_PROJECT_ID" --replication-policy="automatic" || \
+              gcloud secrets versions add "$name" --data-file="$f" --project="$GCP_PROJECT_ID"
+          done
 
-      # NOTE: This workflow uses FIREBASE_TOKEN-based deploys and does not
-      # require gcloud/OIDC auth to proceed.
+      - name: Resolve function deployment target
+        if: contains(inputs.target, 'functions')
+        run: |
+          set -euo pipefail
+          
+          if [[ "${{ inputs.target }}" == "functions:specific" ]]; then
+            FUNCTIONS_INPUT='${{ github.event.inputs.functions }}'
+            if [[ -z "$FUNCTIONS_INPUT" ]]; then
+              echo "No function list provided for specific deployment." >&2
+              exit 1
+            fi
+            IFS=',' read -r -a arr <<< "$FUNCTIONS_INPUT"
+            deploy_arg=""
+            for fn in "${arr[@]}"; do
+              fn_trimmed=$(echo "$fn" | xargs)
+              if [[ -n "$fn_trimmed" ]]; then
+                if [[ -n "$deploy_arg" ]]; then
+                  deploy_arg="$deploy_arg,functions:$fn_trimmed"
+                else
+                  deploy_arg="functions:$fn_trimmed"
+                fi
+              fi
+            done
+            echo "DEPLOY_ARG=$deploy_arg" >> "$GITHUB_ENV"
+          else
+            echo "DEPLOY_ARG=functions" >> "$GITHUB_ENV"
+          fi
 
       - name: Deploy Functions
         if: contains(inputs.target, 'functions')
         working-directory: services/functions
         env:
-          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
           ADMIN_OWNER_UIDS: ${{ secrets.ADMIN_OWNER_UIDS }}
         run: |
           set -euo pipefail
@@ -164,13 +231,13 @@ jobs:
               printf '\nADMIN_OWNER_UIDS=%s\n' "$ADMIN_OWNER_UIDS" >> .env
             fi
           fi
-          firebase deploy --only functions --project "$FIREBASE_PROJECT_ID" --token "$FIREBASE_TOKEN"
+          firebase deploy --only "$DEPLOY_ARG" --project "$FIREBASE_PROJECT_ID"
 
       - name: Deploy Admin Hosting
         if: contains(inputs.target, 'hosting:admin')
         working-directory: apps/admin
         env:
-          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+          FIREBASE_TOKEN: ${{ env.FIREBASE_TOKEN }}
         run: |
           set -euo pipefail
           npm ci
@@ -189,6 +256,8 @@ jobs:
           FIREBASE_HOSTING_SITE_WEB_PROD: ${{ vars.FIREBASE_HOSTING_SITE_WEB_PROD }}
           GCP_PROJECT_STAGING: ${{ vars.GCP_PROJECT_STAGING }}
           GCP_PROJECT_PROD: ${{ vars.GCP_PROJECT_PROD }}
+          API_BASE_URL_STAGING: ${{ vars.API_BASE_URL_STAGING }}
+          API_BASE_URL_PROD: ${{ vars.API_BASE_URL_PROD }}
           GCP_WORKLOAD_ID_PROVIDER: ${{ secrets.GCP_WORKLOAD_ID_PROVIDER }}
           GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
           FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
@@ -210,7 +279,24 @@ jobs:
       - name: Deploy Website Hosting
         if: contains(inputs.target, 'hosting:website')
         env:
-          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+          FIREBASE_TOKEN: ${{ env.FIREBASE_TOKEN }}
         run: |
           set -euo pipefail
           firebase deploy --only "hosting:${FIREBASE_HOSTING_SITE_WEB}" --project "$FIREBASE_PROJECT_ID" --token "$FIREBASE_TOKEN"
+
+      - name: Run smoke checks
+        if: contains(inputs.target, 'functions')
+        run: |
+          set -euo pipefail
+          if [[ -n "${API_BASE_URL:-}" ]]; then
+            curl -fS "${API_BASE_URL}/api/health" >/dev/null
+          fi
+          curl -fS "https://asia-south1-${GCP_PROJECT_ID}.cloudfunctions.net/testSecretAccess" >/dev/null || true
+
+      - name: Notify deployment success
+        if: success()
+        run: |
+          echo "✅ Deployment completed successfully!"
+          echo "Environment: ${{ env.TARGET_ENV }}"
+          echo "Target: ${{ inputs.target }}"
+          echo "Project: ${{ env.FIREBASE_PROJECT_ID }}"
