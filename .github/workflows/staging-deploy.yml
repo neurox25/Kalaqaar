@@ -48,7 +48,7 @@ env:
 
 jobs:
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment == 'prod' && 'production' || 'staging' }}
+    environment: ${{ inputs.environment == 'prod' && 'production' || (inputs.environment == 'staging' && 'staging') || 'staging' }}
     concurrency:
       group: env-deploy-${{ inputs.environment }}-${{ inputs.target }}
       cancel-in-progress: false
